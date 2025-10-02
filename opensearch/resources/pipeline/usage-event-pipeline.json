@@ -1,0 +1,56 @@
+{
+  "description": "Parse log line -> parse V2_BODY -> extract fields (inner pipeline).",
+  "processors": [
+    {
+      "grok": {
+        "field": "message",
+        "patterns": [
+          "%{TIMESTAMP_ISO8601:ts} \\[%{DATA:level}\\]: IP: \\[%{DATA:ip}\\] SESSION: \\[%{DATA:session_id}\\] USER: \\[%{DATA:user}\\] REQ_METHOD: \\[%{WORD:method}\\] HOST: \\[%{DATA:host}\\] PATH: \\[%{DATA:path}\\] STATUS_CODE: \\[%{INT:status}\\](?: RESPONSE-TIME: \\[%{INT:rt}\\])?(?: V2_BODY: \\[%{GREEDYDATA:V2_BODY}\\])?"
+        ]
+      }
+    },
+    {
+      "date": {
+        "field": "ts",
+        "formats": ["ISO8601"],
+        "target_field": "@timestamp",
+        "ignore_failure": true
+      }
+    },
+    {
+      "remove": {
+        "field": ["ts", "ip"],
+        "ignore_failure": true
+      }
+    },
+    {
+      "json": {
+        "field": "V2_BODY",
+        "target_field": "v2_body",
+        "add_to_root": false,
+        "ignore_failure": true
+      }
+    },
+    { "pipeline": { "name": "usage_event_pipeline_inner" } },
+    {
+      "remove": {
+        "field": [
+          "V2_BODY",
+          "host",
+          "level",
+          "method",
+          "status",
+          "rt",
+          "path",
+          "assetTypes_event",
+          "assetTypes_default",
+          "siteTokens_event"
+        ],
+        "ignore_failure": true
+      }
+    }
+  ],
+  "on_failure": [
+    { "set": { "field": "ingest_error", "value": "{{ _ingest.on_failure_message }}" } }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "transform": {
+    "description": "usage-events-* -> usage-sessions (per tenantId/user/session_id) with unions + pages + hadLogin",
+    "source_index": "usage-events-*",
+    "data_selection_query": { "term": { "is_noise": false } },
+    "target_index": "usage-sessions",
+    "page_size": 1000,
+    "groups": [
+      { "terms": { "source_field": "tenantId",   "target_field": "tenantId" } },
+      { "terms": { "source_field": "user",       "target_field": "user" } },
+      { "terms": { "source_field": "session_id", "target_field": "session_id" } }
+    ],
+    "aggregations": {
+      "sessionStart": { "min": { "field": "@timestamp" } },
+      "sessionEnd":   { "max": { "field": "@timestamp" } },
+      "eventCount":   { "value_count": { "field": "@timestamp" } },
+
+      "assetTypes": {
+        "scripted_metric": {
+          "init_script":   { "lang":"painless", "source":"state.s=new HashSet();" },
+          "map_script":    { "lang":"painless", "source":"def src=params._source;if(src==null)return; if(src.is_interaction==true && src.assetType_path!=null){state.s.add(src.assetType_path);} def vb=src.v2_body; if(vb==null)return; if(vb instanceof List){ for(def it:vb){ if(it instanceof Map && it.containsKey('include') && it.include!=null && it.include.containsKey('assetType') && it.include.assetType!=null){ def v=it.include.assetType; if(v instanceof List){ for(def p:v){ if(p!=null){def t=p.toString().trim(); if(t.length()>0)state.s.add(t);} } } else { String s=v.toString(); int i=0; while(true){ int j=s.indexOf(',',i); String part=(j>=0?s.substring(i,j):s.substring(i)); part=part.trim(); if(part.length()>0)state.s.add(part); if(j<0)break; i=j+1; } } } } } else if(vb instanceof Map && vb.containsKey('include') && vb.include!=null && vb.include.containsKey('assetType') && vb.include.assetType!=null){ def v=vb.include.assetType; if(v instanceof List){ for(def p:v){ if(p!=null){def t=p.toString().trim(); if(t.length()>0)state.s.add(t);} } } else { String s=v.toString(); int i=0; while(true){ int j=s.indexOf(',',i); String part=(j>=0?s.substring(i,j):s.substring(i)); part=part.trim(); if(part.length()>0)state.s.add(part); if(j<0)break; i=j+1; } } }" },
+          "combine_script":{ "lang":"painless", "source":"return state.s;" },t
+          "reduce_script": { "lang":"painless", "source":"def out=new HashSet(); for (s in states){ out.addAll(s);} return out.toArray();" }
+        }
+      },
+
+      "siteTokens": {
+        "scripted_metric": {
+          "init_script":   { "lang":"painless", "source":"state.s=new HashSet();" },
+          "map_script":    { "lang":"painless", "source":"def src=params._source;if(src==null)return; if(src.siteToken_path!=null){state.s.add(src.siteToken_path);} def vb=src.v2_body; if(vb==null)return; if(vb instanceof List){ for(def it:vb){ if(it instanceof Map && it.containsKey('include') && it.include!=null && it.include.containsKey('siteToken') && it.include.siteToken!=null){ def v=it.include.siteToken; if(v instanceof List){ for(def p:v){ if(p!=null){def t=p.toString().trim(); if(t.length()>0)state.s.add(t);} } } else { String s=v.toString(); int i=0; while(true){ int j=s.indexOf(',',i); String part=(j>=0?s.substring(i,j):s.substring(i)); part=part.trim(); if(part.length()>0)state.s.add(part); if(j<0)break; i=j+1; } } } } } else if(vb instanceof Map && vb.containsKey('include') && vb.include!=null && vb.include.containsKey('siteToken') && vb.include.siteToken!=null){ def v=vb.include.siteToken; if(v instanceof List){ for(def p:v){ if(p!=null){def t=p.toString().trim(); if(t.length()>0)state.s.add(t);} } } else { String s=v.toString(); int i=0; while(true){ int j=s.indexOf(',',i); String part=(j>=0?s.substring(i,j):s.substring(i)); part=part.trim(); if(part.length()>0)state.s.add(part); if(j<0)break; i=j+1; } } }" },
+          "combine_script":{ "lang":"painless", "source":"return state.s;" },
+          "reduce_script": { "lang":"painless", "source":"def out=new HashSet(); for (s in states){ out.addAll(s);} return out.toArray();" }
+        }
+      },
+
+      "pages": {
+        "scripted_metric": {
+          "init_script":   { "lang":"painless", "source":"state.s=new HashSet();" },
+          "map_script":    { "lang":"painless", "source":"def src=params._source; if(src!=null && src.page_extracted!=null){ state.s.add(src.page_extracted); }" },
+          "combine_script":{ "lang":"painless", "source":"return state.s;" },
+          "reduce_script": { "lang":"painless", "source":"def out=new HashSet(); for (s in states){ out.addAll(s);} return out.toArray();" }
+        }
+      },
+
+      "hadLogin": {
+        "scripted_metric": {
+          "init_script":   { "lang":"painless", "source":"state.f=false;" },
+          "map_script":    { "lang":"painless", "source":"def src=params._source; if(src!=null && src.is_login==true){ state.f=true; }" },
+          "combine_script":{ "lang":"painless", "source":"return state.f;" },
+          "reduce_script": { "lang":"painless", "source":"boolean any=false; for (f in states){ if(f==true){ any=true; break; } } return any;" }
+        }
+      }
+    },
+    "continuous": true,
+    "schedule": { "interval": { "period": 1, "unit": "Minutes" } }
+  }
+}

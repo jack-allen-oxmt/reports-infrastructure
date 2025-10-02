@@ -1,0 +1,33 @@
+{
+  "index_patterns": ["usage-sessions*"],
+  "template": {
+    "settings": {
+      "index": {
+        "default_pipeline": "usage_session_dest_pipeline",
+        "refresh_interval": "30s"
+      }
+    },
+    "mappings": {
+      "properties": {
+        "tenantId":        { "type": "keyword" },
+        "user":            { "type": "keyword" },
+        "session_id":      { "type": "keyword" },
+        "sessionStart":    { "type": "date" },
+        "sessionEnd":      { "type": "date" },
+        "sessionDate":     { "type": "date" },
+        "durationSeconds": { "type": "long" },
+        "eventCount":      { "type": "integer" },
+        "assetTypes":      { "type": "keyword" },
+        "siteTokens":      { "type": "keyword" },
+        "pages":           { "type": "keyword" },
+        "hadLogin":        { "type": "boolean" },
+        "transform": {
+          "properties": {
+            "_id":        { "type": "keyword" },
+            "_doc_count": { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

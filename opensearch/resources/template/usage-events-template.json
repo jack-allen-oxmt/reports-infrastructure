@@ -1,0 +1,31 @@
+{
+  "index_patterns": ["usage-events-*"],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "default_pipeline": "usage_event_pipeline",
+        "refresh_interval": "30s"
+      }
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp":      { "type": "date" },
+        "tenantId":        { "type": "keyword" },
+        "user":            { "type": "keyword" },
+        "session_id":      { "type": "keyword" },
+
+        "is_noise":        { "type": "boolean" },
+        "is_interaction":  { "type": "boolean" },
+        "is_login":        { "type": "boolean" },
+
+        "assetType_path":  { "type": "keyword" },
+        "siteToken_path":  { "type": "keyword" },
+        "page_extracted":  { "type": "keyword" },
+
+        "message":         { "type": "keyword", "index": false },
+        "v2_body":         { "enabled": false }
+      }
+    }
+  }
+}
