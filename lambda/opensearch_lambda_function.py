@@ -4,268 +4,238 @@ import base64
 import re
 import os
 import boto3
+from typing import Optional
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
+# ---- Constants / Regex ----
+NOISE_PATH_PREFIXES = ('/health', '/static/', '/public/', '/ui/v2/_nuxt/', '.locales/')
+PAGE_BEACON_PREFIX = '/im_ws/page-beacon'
+V2_BODY_REGEX = re.compile(r'V2_BODY:\s*\[(.*?)]\s*$', re.DOTALL)
+
+# ---- SigV4 helpers ----
+def _signed_request(method: str, url: str, body: Optional[bytes], headers: dict, region: str) -> Request:
+    """
+    Build a SigV4-signed urllib Request for Amazon OpenSearch Service.
+    """
+    session = boto3.Session()
+    credentials = session.get_credentials().get_frozen_credentials()
+    awsreq = AWSRequest(method=method, url=url, data=body, headers=headers.copy())
+    SigV4Auth(credentials, 'es', region).add_auth(awsreq)
+    return Request(awsreq.url, data=awsreq.body, headers=dict(awsreq.headers), method=method)
+
+def _debug_authinfo(endpoint: str, region: str):
+    """
+    GET /_plugins/_security/authinfo to see how OpenSearch identifies this caller.
+    """
+    url = f'https://{endpoint}/_plugins/_security/authinfo'
+    req = _signed_request('GET', url, None, {}, region)
+    with urlopen(req, timeout=10) as resp:
+        print('AUTHINFO:', resp.read().decode('utf-8', errors='replace'))
+
+# ---- Lambda handler ----
 def lambda_handler(event, context):
     """
     Processes CloudWatch Logs and sends them to OpenSearch
-
-    Args:
-        event: The event data from CloudWatch Logs (dict)
-        context: Lambda execution content (contains runtime info)
-
-    Returns:
-        dict: Status code and message
     """
+    # 0) Input
     if event.get('test_mode'):
-        log_data = {'logEvents': event['logEvents']}
+        log_data = {'logEvents': event.get('logEvents', [])}
     else:
-        # Step 1: Decode the compressed CloudWatch data
         payload = base64.b64decode(event['awslogs']['data'])
         log_data = json.loads(gzip.decompress(payload).decode('utf-8'))
 
-    # Step 2: Get OpenSearch configuration
-    opensearch_endpoint = os.environ.get('OPENSEARCH_ENDPOINT')
-    if not opensearch_endpoint:
+    # 1) Config
+    endpoint = os.environ.get('OPENSEARCH_ENDPOINT')
+    if not endpoint:
         print("ERROR: OPENSEARCH_ENDPOINT environment variable not set")
         return {'statusCode': 500, 'body': 'Missing configuration'}
+    region = os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION') or 'ap-southeast-2'
 
-    # Step 3: Parse and filter log events
+    # Optional: print how OpenSearch sees this caller
+    if event.get('debug_authinfo'):
+        try:
+            _debug_authinfo(endpoint, region)
+        except Exception as e:
+            print('AUTHINFO probe failed:', e)
+
+    # 2) Parse & filter
     documents = []
-    for log_event in log_data['logEvents']:
+    for log_event in log_data.get('logEvents', []):
         doc = parse_log_message(log_event)
-
         if should_include_log(doc):
             documents.append(doc)
 
-    # Step 4: Send batch to OpenSearch
+    # 3) Send
+    sent = 0
     if documents:
-        success_count = send_to_opensearch(documents, opensearch_endpoint)
-        print(f"Successfully sent {success_count}/{len(documents)} documents to OpenSearch")
+        sent = send_to_opensearch(documents, endpoint, region)
+        print(f"Successfully sent {sent}/{len(documents)} documents to OpenSearch")
     else:
         print("No documents to send after filtering")
 
     return {'statusCode': 200, 'body': f'Processed {len(documents)} logs'}
 
+# ---- Parsing helpers ----
 def parse_log_message(log_event):
-    """
-    Parse a single log message and extract fields.
-    """
-    message = log_event['message']
-    timestamp = log_event['timestamp']
+    message = log_event.get('message', '')
+    timestamp = log_event.get('timestamp')
+
+    doc = {'timestamp': timestamp, 'raw_message': message}
+
+    def grab(pattern: str):
+        m = re.search(pattern, message)
+        return m.group(1).strip() if m else None
 
     # Extract fields
-    doc = {
-        'timestamp': timestamp,
-        'raw_message': message # Debugging purposes
-    }
+    session = grab(r'SESSION:\s*\[(.*?)]')
+    if session: doc['session_id'] = session
 
-    # Extract SESSION
-    session_match = re.search(r'SESSION: \[(.*?)]', message)
-    if session_match:
-        doc['session_id'] = session_match.group(1)
+    user = grab(r'USER:\s*\[(.*?)]')
+    if user: doc['user'] = user
 
-    # Extract USER
-    user_match = re.search(r'USER: \[(.*?)]', message)
-    if user_match:
-        doc['user'] = user_match.group(1)
+    path = grab(r'PATH:\s*\[(.*?)]')
+    if path: doc['path'] = path
 
-    # Extract PATH
-    path_match = re.search(r'PATH: \[(.*?)]', message)
-    if path_match:
-        doc['path'] = path_match.group(1)
+    method = grab(r'REQ_METHOD:\s*\[(.*?)]')
+    if method: doc['method'] = method
 
-    # Extract REQ_METHOD
-    method_match = re.search(r'REQ_METHOD: \[(.*?)]', message)
-    if method_match:
-        doc['method'] = method_match.group(1)
-
-    # Extract STATUS_CODE
-    status_match = re.search(r'STATUS_CODE: \[(.*?)]', message)
-    if status_match:
+    status = grab(r'STATUS_CODE:\s*\[(.*?)]')
+    if status:
         try:
-            doc['status_code'] = int(status_match.group(1))
+            doc['status_code'] = int(status)
         except ValueError:
-            print(f"Invalid status code: {status_match.group(1)}")
+            print(f"Invalid status code: {status}")
 
-    # Extract RESPONSE_TIME
-    response_time_match = re.search(r'RESPONSE-TIME: \[(.*?)]', message)
-    if response_time_match:
+    # RESPONSE-TIME or RESPONSE_TIME
+    rt = grab(r'RESPONSE[-_]TIME:\s*\[(.*?)]')
+    if rt:
         try:
-            doc['response_time'] = int(response_time_match.group(1))
+            doc['response_time'] = int(rt)
         except ValueError:
-            print(f"Invalid response time: {response_time_match.group(1)}")
+            print(f"Invalid response time: {rt}")
 
-    # Extract module from page-beacon paths
-    if 'path' in doc and doc['path'].startswith('/im_ws/page-beacon/'):
-        doc['module'] = doc['path'].split('/')[-1]
+    # Page-beacon module: slice known prefix
+    if 'path' in doc and doc['path'].startswith(PAGE_BEACON_PREFIX):
+        suffix = doc['path'][len(PAGE_BEACON_PREFIX):]  # keep nested segments
+        if suffix.startswith('/'):
+            suffix = suffix[1:]
+        doc['module'] = suffix or '/'
 
-    # Extract V2_BODY and parse JSON
-    v2_body_match = re.search(r'V2_BODY: \[(.*)]$', message)
-    if v2_body_match:
+    # V2_BODY (may be multiline)
+    m = V2_BODY_REGEX.search(message)
+    if m:
         try:
-            v2_body_json = json.loads(v2_body_match.group(1))
-
-            # Extract assetTypes
+            v2_body_json = json.loads(m.group(1).strip())
             asset_types = extract_asset_types(v2_body_json)
-            if asset_types:
-                doc['assetTypes'] = asset_types
-
-            # Extract siteTokens
+            if asset_types: doc['assetTypes'] = asset_types
             site_tokens = extract_site_tokens(v2_body_json)
-            if site_tokens:
-                doc['siteTokens'] = site_tokens
-
+            if site_tokens: doc['siteTokens'] = site_tokens
         except json.JSONDecodeError as e:
             print(f'Failed to parse V2_BODY JSON: {e}')
 
     return doc
 
-
 def extract_asset_types(v2_body):
-    """
-    Extract assetTypes from V2_BODY JSON structure
-    """
     asset_types = []
-
-    # V2 BODY can be a list or dict, handle both cases - todo: verify this?
     if isinstance(v2_body, list):
         for item in v2_body:
             if isinstance(item, dict) and 'include' in item:
-                asset_type_str: str = item['include'].get('assetType', '')
-                if asset_type_str:
-                    # assetType is comma-seperated string
-                    asset_types.extend(asset_type_str.split(','))
+                s = (item.get('include') or {}).get('assetType', '')
+                if s:
+                    asset_types.extend([p.strip() for p in s.split(',') if p.strip()])
     elif isinstance(v2_body, dict) and 'include' in v2_body:
-        asset_type_str: str = v2_body['include'].get('assetType', '')
-        if asset_type_str:
-            asset_types.extend(asset_type_str.split(','))
-
-    return list(set(asset_types)) if asset_types else None
-
+        s = (v2_body.get('include') or {}).get('assetType', '')
+        if s:
+            asset_types.extend([p.strip() for p in s.split(',') if p.strip()])
+    return sorted(set(asset_types)) if asset_types else None
 
 def extract_site_tokens(v2_body):
-    """
-    Extract siteTokens from V2_BODY JSON structure
-    """
     site_tokens = []
-
-    # V2_BODY can be a list or dict, handle both
     if isinstance(v2_body, list):
         for item in v2_body:
             if isinstance(item, dict) and 'include' in item:
-                site_token_str = item['include'].get('siteToken', '')
-                if site_token_str:
-                    # siteToken is comma-separated string
-                    site_tokens.extend(site_token_str.split(','))
+                s = (item.get('include') or {}).get('siteToken', '')
+                if s:
+                    site_tokens.extend([p.strip() for p in s.split(',') if p.strip()])
     elif isinstance(v2_body, dict) and 'include' in v2_body:
-        site_token_str = v2_body['include'].get('siteToken', '')
-        if site_token_str:
-            site_tokens.extend(site_token_str.split(','))
-
-    # Return unique values
-    return list(set(site_tokens)) if site_tokens else None
-
+        s = (v2_body.get('include') or {}).get('siteToken', '')
+        if s:
+            site_tokens.extend([p.strip() for p in s.split(',') if p.strip()])
+    return sorted(set(site_tokens)) if site_tokens else None
 
 def should_include_log(doc):
-    """
-    Filter logic - return True if log should be included
-    """
-    # Must have user
-    if 'user' not in doc:
+    user = doc.get('user')
+    if not user or user == 'UNAUTHENTICATED' or user == 'canary@oxmt.net':
         return False
 
-    # Filter out UNAUTHENTICATED
-    if doc['user'] == 'UNAUTHENTICATED':
+    path = doc.get('path')
+    if not path:
         return False
 
-    # Filter out canary
-    if doc['user'] == 'canary@oxmt.net':
+    if path.startswith(NOISE_PATH_PREFIXES):
         return False
 
-    # Must have a path
-    if 'path' not in doc:
-        return False
-
-    path = doc['path']
-
-    # Filter out noise path
-    noise_paths = ['/health', '/static/', '/public/', '/ui/v2/_nuxt/', '.locales/']
-    if any(path.startswith(noise_path) for noise_path in noise_paths):
-        return False
-
-    # Filter out HPM proxy logs
     if '[HPM]' in doc.get('raw_message', ''):
         return False
 
-    # Filter out failed image requests
     if path.startswith('/im_api/img/') and doc.get('status_code') == 400:
         return False
 
     return True
 
-
-def send_to_opensearch(documents, endpoint):
+# ---- OpenSearch bulk ----
+def send_to_opensearch(documents, endpoint, region):
     """
-    Send documents to OpenSearch via bulk API using IAM authentication
+    Send documents to OpenSearch via bulk API using IAM authentication.
+    Groups by event date so each day gets its own index.
     """
     from datetime import datetime
 
-    # Group documents by their event date
     docs_by_date = {}
     for doc in documents:
-        event_date = datetime.utcfromtimestamp(doc['timestamp'] / 1000.0)
-        date_str = event_date.strftime('%Y-%m-%d')
-
-        if date_str not in docs_by_date:
-            docs_by_date[date_str] = []
-        docs_by_date[date_str].append(doc)
-
-    # Get AWS credentials for signing
-    session = boto3.Session()
-    credentials = session.get_credentials()
-    region = os.environ.get('AWS_REGION', 'ap-southeast-2')
+        ts = (doc.get('timestamp') or 0) / 1000.0
+        date_str = datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d')
+        docs_by_date.setdefault(date_str, []).append(doc)
 
     total_success = 0
-
     for date_str, docs in docs_by_date.items():
         index_name = f'request-events-{date_str}'
 
-        # Build bulk request body
-        bulk_data = []
-        for doc in docs:
-            doc.pop('raw_message', None)
-            bulk_data.append(json.dumps({"index": {"_index": index_name}}))
-            bulk_data.append(json.dumps(doc))
+        # Bulk NDJSON
+        lines = []
+        for d in docs:
+            d = dict(d)
+            d.pop('raw_message', None)
+            lines.append(json.dumps({"index": {"_index": index_name}}, separators=(',', ':')))
+            lines.append(json.dumps(d, separators=(',', ':')))
+        bulk_body = '\n'.join(lines) + '\n'
 
-        bulk_body = '\n'.join(bulk_data) + '\n'
-
-        # Create signed request
         url = f'https://{endpoint}/_bulk'
-        headers = {
-            'Content-Type': 'application/x-ndjson'
-        }
-
-        # Use AWS SigV4 to sign the request
-        request = AWSRequest(method='POST', url=url, data=bulk_body, headers=headers)
-        SigV4Auth(credentials, 'es', region).add_auth(request)
+        headers = {'Content-Type': 'application/x-ndjson'}
 
         try:
-            # Send signed request
-            req = Request(request.url, data=request.body, headers=dict(request.headers), method='POST')
-            response = urlopen(req, timeout=10)
-            result = json.loads(response.read().decode('utf-8'))
-
-            success_count = sum(1 for item in result.get('items', []) if item.get('index', {}).get('status') in [200, 201])
+            req = _signed_request('POST', url, bulk_body.encode('utf-8'), headers, region)
+            with urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode('utf-8'))
+            success_count = sum(
+                1 for item in result.get('items', [])
+                if (item.get('index') or item.get('create') or {}).get('status') in (200, 201)
+            )
             total_success += success_count
-
             print(f"Sent {success_count}/{len(docs)} documents to index {index_name}")
 
-        except (URLError, HTTPError) as e:
-            print(f"Error sending to OpenSearch index {index_name}: {e}")
+        except HTTPError as e:
+            try:
+                body = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                body = '<no body>'
+            print(f"Error sending to OpenSearch index {index_name}: {e} | body={body}")
+            continue
+        except URLError as e:
+            print(f"Network error sending to OpenSearch index {index_name}: {e}")
             continue
 
     return total_success
