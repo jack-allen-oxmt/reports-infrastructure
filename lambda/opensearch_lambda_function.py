@@ -3,6 +3,9 @@ import gzip
 import base64
 import re
 import os
+import boto3
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
@@ -17,10 +20,12 @@ def lambda_handler(event, context):
     Returns:
         dict: Status code and message
     """
-
-    # Step 1: Decode the compressed CloudWatch data
-    payload = base64.b64decode(event['awslogs']['data'])
-    log_data = json.loads(gzip.decompress(payload).decode('utf-8'))
+    if event.get('test_mode'):
+        log_data = {'logEvents': event['logEvents']}
+    else:
+        # Step 1: Decode the compressed CloudWatch data
+        payload = base64.b64decode(event['awslogs']['data'])
+        log_data = json.loads(gzip.decompress(payload).decode('utf-8'))
 
     # Step 2: Get OpenSearch configuration
     opensearch_endpoint = os.environ.get('OPENSEARCH_ENDPOINT')
@@ -205,15 +210,13 @@ def should_include_log(doc):
 
 def send_to_opensearch(documents, endpoint):
     """
-    Send documents to OpenSearch via bulk API
-    Groups documents by date to ensure they land in the correct daily index
+    Send documents to OpenSearch via bulk API using IAM authentication
     """
     from datetime import datetime
 
-    # Group documents by their event date (not current date)
+    # Group documents by their event date
     docs_by_date = {}
     for doc in documents:
-        # Convert milliseconds timestamp to datetime
         event_date = datetime.utcfromtimestamp(doc['timestamp'] / 1000.0)
         date_str = event_date.strftime('%Y-%m-%d')
 
@@ -221,7 +224,11 @@ def send_to_opensearch(documents, endpoint):
             docs_by_date[date_str] = []
         docs_by_date[date_str].append(doc)
 
-    # Send documents to their respective daily indices
+    # Get AWS credentials for signing
+    session = boto3.Session()
+    credentials = session.get_credentials()
+    region = os.environ.get('AWS_REGION', 'ap-southeast-2')
+
     total_success = 0
 
     for date_str, docs in docs_by_date.items():
@@ -230,28 +237,28 @@ def send_to_opensearch(documents, endpoint):
         # Build bulk request body
         bulk_data = []
         for doc in docs:
-            # Remove raw_message before indexing (was for debugging only)
             doc.pop('raw_message', None)
-
-            # Index action
             bulk_data.append(json.dumps({"index": {"_index": index_name}}))
-            # Document
             bulk_data.append(json.dumps(doc))
 
         bulk_body = '\n'.join(bulk_data) + '\n'
 
-        # Send to OpenSearch
+        # Create signed request
         url = f'https://{endpoint}/_bulk'
         headers = {
             'Content-Type': 'application/x-ndjson'
         }
 
+        # Use AWS SigV4 to sign the request
+        request = AWSRequest(method='POST', url=url, data=bulk_body, headers=headers)
+        SigV4Auth(credentials, 'es', region).add_auth(request)
+
         try:
-            request = Request(url, data=bulk_body.encode('utf-8'), headers=headers, method='POST')
-            response = urlopen(request, timeout=10)  # 10 second timeout
+            # Send signed request
+            req = Request(request.url, data=request.body, headers=dict(request.headers), method='POST')
+            response = urlopen(req, timeout=10)
             result = json.loads(response.read().decode('utf-8'))
 
-            # Count successes
             success_count = sum(1 for item in result.get('items', []) if item.get('index', {}).get('status') in [200, 201])
             total_success += success_count
 
