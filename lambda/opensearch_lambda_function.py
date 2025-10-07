@@ -11,23 +11,22 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 from datetime import datetime
 
-# ---- Constants / Regex ----
 NOISE_PATH_PREFIXES = ('/health', '/static/', '/public/', '/ui/v2/_nuxt/', '.locales/')
 PAGE_BEACON_PREFIX = '/im_ws/page-beacon'
 V2_BODY_REGEX = re.compile(r'V2_BODY:\s*\[(.*?)]\s*$', re.DOTALL)
 
-# ---- SigV4 helpers ----
+
 def _signed_request(method: str, url: str, body: Optional[bytes], headers: dict, region: str) -> Request:
     """
     Build a SigV4-signed urllib Request for Amazon OpenSearch Service.
     """
     session = boto3.Session()
     credentials = session.get_credentials().get_frozen_credentials()
-    awsreq = AWSRequest(method=method, url=url, data=body, headers=headers.copy())
-    SigV4Auth(credentials, 'es', region).add_auth(awsreq)
-    return Request(awsreq.url, data=awsreq.body, headers=dict(awsreq.headers), method=method)
+    aws_req = AWSRequest(method=method, url=url, data=body, headers=headers.copy())
+    SigV4Auth(credentials, 'es', region).add_auth(aws_req)
+    return Request(aws_req.url, data=aws_req.body, headers=dict(aws_req.headers), method=method)
 
-# ---- Lambda handler ----
+
 def lambda_handler(event, context):
     """
     Processes CloudWatch Logs and sends them to OpenSearch.
@@ -71,7 +70,7 @@ def lambda_handler(event, context):
         'body': f'Processed {len(documents)} events, updated {sessions_updated} sessions'
     }
 
-# ---- Parsing helpers (unchanged) ----
+
 def parse_log_message(log_event):
     message = log_event.get('message', '')
     timestamp = log_event.get('timestamp')
@@ -127,6 +126,7 @@ def parse_log_message(log_event):
 
     return doc
 
+
 def extract_asset_types(v2_body):
     asset_types = []
     if isinstance(v2_body, list):
@@ -141,6 +141,7 @@ def extract_asset_types(v2_body):
             asset_types.extend([p.strip() for p in s.split(',') if p.strip()])
     return sorted(set(asset_types)) if asset_types else None
 
+
 def extract_site_tokens(v2_body):
     site_tokens = []
     if isinstance(v2_body, list):
@@ -154,6 +155,7 @@ def extract_site_tokens(v2_body):
         if s:
             site_tokens.extend([p.strip() for p in s.split(',') if p.strip()])
     return sorted(set(site_tokens)) if site_tokens else None
+
 
 def should_include_log(doc):
     user = doc.get('user')
@@ -175,7 +177,7 @@ def should_include_log(doc):
 
     return True
 
-# ---- OpenSearch bulk (events) ----
+
 def send_events_to_opensearch(documents, endpoint, region):
     """
     Send individual event documents to daily indices.
@@ -205,10 +207,12 @@ def send_events_to_opensearch(documents, endpoint, region):
             req = _signed_request('POST', url, bulk_body.encode('utf-8'), headers, region)
             with urlopen(req, timeout=10) as resp:
                 result = json.loads(resp.read().decode('utf-8'))
+
             success_count = sum(
                 1 for item in result.get('items', [])
                 if (item.get('index') or item.get('create') or {}).get('status') in (200, 201)
             )
+
             total_success += success_count
             print(f"Sent {success_count}/{len(docs)} event documents to index {index_name}")
 
@@ -225,7 +229,7 @@ def send_events_to_opensearch(documents, endpoint, region):
 
     return total_success
 
-# ---- Session aggregation and upsert ----
+
 def update_session_summaries(documents: List[Dict], endpoint: str, region: str) -> int:
     """
     Group documents by session_id and upsert session summary documents.
@@ -273,42 +277,61 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
             if event.get('timestamp'):
                 timestamps.append(event['timestamp'])
 
-        # Build the update script
-        # This script merges new data with existing session data
+        # Convert to sorted lists for consistency
+        modules_list = sorted(list(modules))
+        paths_list = sorted(list(paths))
+        asset_types_list = sorted(list(asset_types))
+        site_tokens_list = sorted(list(site_tokens))
+
+        # Build the update script with proper deduplication
         script = {
             "script": {
                 "source": """
-                    if (ctx._source.containsKey('modules')) {
-                        ctx._source.modules.addAll(params.modules);
-                    } else {
-                        ctx._source.modules = params.modules;
-                    }
-                    if (ctx._source.containsKey('paths')) {
-                        ctx._source.paths.addAll(params.paths);
-                    } else {
-                        ctx._source.paths = params.paths;
-                    }
-                    if (ctx._source.containsKey('assetTypes')) {
-                        ctx._source.assetTypes.addAll(params.assetTypes);
-                    } else {
-                        ctx._source.assetTypes = params.assetTypes;
-                    }
-                    if (ctx._source.containsKey('siteTokens')) {
-                        ctx._source.siteTokens.addAll(params.siteTokens);
-                    } else {
-                        ctx._source.siteTokens = params.siteTokens;
-                    }
-                    ctx._source.start_time = Math.min(ctx._source.start_time, params.min_timestamp);
-                    ctx._source.end_time = Math.max(ctx._source.end_time, params.max_timestamp);
-                    ctx._source.event_count += params.new_event_count;
-                    ctx._source.duration_seconds = (ctx._source.end_time - ctx._source.start_time) / 1000;
-                    ctx._source.last_updated = params.last_updated;
-                """,
+            // Merge arrays with deduplication using stream API
+            if (ctx._source.containsKey('modules')) {
+                def combined = new ArrayList(ctx._source.modules);
+                combined.addAll(params.modules);
+                ctx._source.modules = combined.stream().distinct().sorted().collect(Collectors.toList());
+            } else {
+                ctx._source.modules = params.modules;
+            }
+            
+            if (ctx._source.containsKey('paths')) {
+                def combined = new ArrayList(ctx._source.paths);
+                combined.addAll(params.paths);
+                ctx._source.paths = combined.stream().distinct().sorted().collect(Collectors.toList());
+            } else {
+                ctx._source.paths = params.paths;
+            }
+            
+            if (ctx._source.containsKey('assetTypes')) {
+                def combined = new ArrayList(ctx._source.assetTypes);
+                combined.addAll(params.assetTypes);
+                ctx._source.assetTypes = combined.stream().distinct().sorted().collect(Collectors.toList());
+            } else {
+                ctx._source.assetTypes = params.assetTypes;
+            }
+            
+            if (ctx._source.containsKey('siteTokens')) {
+                def combined = new ArrayList(ctx._source.siteTokens);
+                combined.addAll(params.siteTokens);
+                ctx._source.siteTokens = combined.stream().distinct().sorted().collect(Collectors.toList());
+            } else {
+                ctx._source.siteTokens = params.siteTokens;
+            }
+            
+            // Update timestamps
+            ctx._source.start_time = Math.min(ctx._source.start_time, params.min_timestamp);
+            ctx._source.end_time = Math.max(ctx._source.end_time, params.max_timestamp);
+            ctx._source.event_count += params.new_event_count;
+            ctx._source.duration_seconds = (double)(ctx._source.end_time - ctx._source.start_time) / 1000.0;
+            ctx._source.last_updated = params.last_updated;
+        """,
                 "params": {
-                    "modules": sorted(list(modules)),
-                    "paths": sorted(list(paths)),
-                    "assetTypes": sorted(list(asset_types)),
-                    "siteTokens": sorted(list(site_tokens)),
+                    "modules": modules_list,
+                    "paths": paths_list,
+                    "assetTypes": asset_types_list,
+                    "siteTokens": site_tokens_list,
                     "min_timestamp": min(timestamps) if timestamps else 0,
                     "max_timestamp": max(timestamps) if timestamps else 0,
                     "new_event_count": len(events),
@@ -319,14 +342,14 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
             "upsert": {
                 "session_id": session_id,
                 "user": session_data['user'],
-                "modules": sorted(list(modules)),
-                "paths": sorted(list(paths)),
-                "assetTypes": sorted(list(asset_types)),
-                "siteTokens": sorted(list(site_tokens)),
+                "modules": modules_list,
+                "paths": paths_list,
+                "assetTypes": asset_types_list,
+                "siteTokens": site_tokens_list,
                 "start_time": min(timestamps) if timestamps else 0,
                 "end_time": max(timestamps) if timestamps else 0,
                 "event_count": len(events),
-                "duration_seconds": (max(timestamps) - min(timestamps)) / 1000 if timestamps else 0,
+                "duration_seconds": (max(timestamps) - min(timestamps)) / 1000.0 if timestamps else 0,
                 "last_updated": int(datetime.utcnow().timestamp() * 1000)
             }
         }
@@ -351,10 +374,19 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
         with urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode('utf-8'))
 
+        # LOG THE FULL RESPONSE
+        print(f"Session update response: {json.dumps(result, indent=2)}")
+
         success_count = sum(
             1 for item in result.get('items', [])
             if (item.get('update') or {}).get('status') in (200, 201)
         )
+
+        # LOG FAILURES
+        for item in result.get('items', []):
+            update_result = item.get('update', {})
+            if update_result.get('status') not in (200, 201):
+                print(f"FAILED SESSION UPDATE: {json.dumps(item, indent=2)}")
 
         print(f"Updated {success_count}/{len(sessions)} session summaries")
         return success_count
@@ -362,6 +394,7 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
     except HTTPError as e:
         try:
             body = e.read().decode('utf-8', errors='replace')
+            print(f"ERROR DETAILS: {body}")
         except Exception:
             body = '<no body>'
         print(f"Error updating session summaries: {e} | body={body}")
