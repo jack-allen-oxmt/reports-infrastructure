@@ -15,7 +15,6 @@ NOISE_PATH_PREFIXES = ('/health', '/static/', '/public/', '/ui/v2/_nuxt/', '.loc
 PAGE_BEACON_PREFIX = '/im_ws/page-beacon'
 V2_BODY_REGEX = re.compile(r'V2_BODY:\s*\[(.*?)]\s*$', re.DOTALL)
 
-
 def _signed_request(method: str, url: str, body: Optional[bytes], headers: dict, region: str) -> Request:
     """
     Build a SigV4-signed urllib Request for Amazon OpenSearch Service.
@@ -25,7 +24,6 @@ def _signed_request(method: str, url: str, body: Optional[bytes], headers: dict,
     aws_req = AWSRequest(method=method, url=url, data=body, headers=headers.copy())
     SigV4Auth(credentials, 'es', region).add_auth(aws_req)
     return Request(aws_req.url, data=aws_req.body, headers=dict(aws_req.headers), method=method)
-
 
 def lambda_handler(event, context):
     """
@@ -69,7 +67,6 @@ def lambda_handler(event, context):
         'statusCode': 200,
         'body': f'Processed {len(documents)} events, updated {sessions_updated} sessions'
     }
-
 
 def parse_log_message(log_event):
     message = log_event.get('message', '')
@@ -126,7 +123,6 @@ def parse_log_message(log_event):
 
     return doc
 
-
 def extract_asset_types(v2_body):
     asset_types = []
     if isinstance(v2_body, list):
@@ -141,7 +137,6 @@ def extract_asset_types(v2_body):
             asset_types.extend([p.strip() for p in s.split(',') if p.strip()])
     return sorted(set(asset_types)) if asset_types else None
 
-
 def extract_site_tokens(v2_body):
     site_tokens = []
     if isinstance(v2_body, list):
@@ -155,7 +150,6 @@ def extract_site_tokens(v2_body):
         if s:
             site_tokens.extend([p.strip() for p in s.split(',') if p.strip()])
     return sorted(set(site_tokens)) if site_tokens else None
-
 
 def should_include_log(doc):
     user = doc.get('user')
@@ -176,7 +170,6 @@ def should_include_log(doc):
         return False
 
     return True
-
 
 def send_events_to_opensearch(documents, endpoint, region):
     """
@@ -229,11 +222,9 @@ def send_events_to_opensearch(documents, endpoint, region):
 
     return total_success
 
-
 def update_session_summaries(documents: List[Dict], endpoint: str, region: str) -> int:
     """
     Group documents by session_id and upsert session summary documents.
-    Uses OpenSearch scripted upsert to merge new data with existing sessions.
     """
     # Group events by session
     sessions = {}
@@ -277,56 +268,54 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
             if event.get('timestamp'):
                 timestamps.append(event['timestamp'])
 
-        # Convert to sorted lists for consistency
+        # Convert to sorted lists
         modules_list = sorted(list(modules))
         paths_list = sorted(list(paths))
         asset_types_list = sorted(list(asset_types))
         site_tokens_list = sorted(list(site_tokens))
 
-        # Build the update script with proper deduplication
+        # Build update script with working deduplication
         script = {
             "script": {
                 "source": """
-            // Merge arrays with deduplication using stream API
-            if (ctx._source.containsKey('modules')) {
-                def combined = new ArrayList(ctx._source.modules);
-                combined.addAll(params.modules);
-                ctx._source.modules = combined.stream().distinct().sorted().collect(Collectors.toList());
-            } else {
-                ctx._source.modules = params.modules;
-            }
-            
-            if (ctx._source.containsKey('paths')) {
-                def combined = new ArrayList(ctx._source.paths);
-                combined.addAll(params.paths);
-                ctx._source.paths = combined.stream().distinct().sorted().collect(Collectors.toList());
-            } else {
-                ctx._source.paths = params.paths;
-            }
-            
-            if (ctx._source.containsKey('assetTypes')) {
-                def combined = new ArrayList(ctx._source.assetTypes);
-                combined.addAll(params.assetTypes);
-                ctx._source.assetTypes = combined.stream().distinct().sorted().collect(Collectors.toList());
-            } else {
-                ctx._source.assetTypes = params.assetTypes;
-            }
-            
-            if (ctx._source.containsKey('siteTokens')) {
-                def combined = new ArrayList(ctx._source.siteTokens);
-                combined.addAll(params.siteTokens);
-                ctx._source.siteTokens = combined.stream().distinct().sorted().collect(Collectors.toList());
-            } else {
-                ctx._source.siteTokens = params.siteTokens;
-            }
-            
-            // Update timestamps
-            ctx._source.start_time = Math.min(ctx._source.start_time, params.min_timestamp);
-            ctx._source.end_time = Math.max(ctx._source.end_time, params.max_timestamp);
-            ctx._source.event_count += params.new_event_count;
-            ctx._source.duration_seconds = (double)(ctx._source.end_time - ctx._source.start_time) / 1000.0;
-            ctx._source.last_updated = params.last_updated;
-        """,
+                    if (ctx._source.containsKey('modules')) {
+                        def combined = new ArrayList(ctx._source.modules);
+                        combined.addAll(params.modules);
+                        ctx._source.modules = combined.stream().distinct().sorted().collect(Collectors.toList());
+                    } else {
+                        ctx._source.modules = params.modules;
+                    }
+                    
+                    if (ctx._source.containsKey('paths')) {
+                        def combined = new ArrayList(ctx._source.paths);
+                        combined.addAll(params.paths);
+                        ctx._source.paths = combined.stream().distinct().sorted().collect(Collectors.toList());
+                    } else {
+                        ctx._source.paths = params.paths;
+                    }
+                    
+                    if (ctx._source.containsKey('assetTypes')) {
+                        def combined = new ArrayList(ctx._source.assetTypes);
+                        combined.addAll(params.assetTypes);
+                        ctx._source.assetTypes = combined.stream().distinct().sorted().collect(Collectors.toList());
+                    } else {
+                        ctx._source.assetTypes = params.assetTypes;
+                    }
+                    
+                    if (ctx._source.containsKey('siteTokens')) {
+                        def combined = new ArrayList(ctx._source.siteTokens);
+                        combined.addAll(params.siteTokens);
+                        ctx._source.siteTokens = combined.stream().distinct().sorted().collect(Collectors.toList());
+                    } else {
+                        ctx._source.siteTokens = params.siteTokens;
+                    }
+                    
+                    ctx._source.start_time = Math.min(ctx._source.start_time, params.min_timestamp);
+                    ctx._source.end_time = Math.max(ctx._source.end_time, params.max_timestamp);
+                    ctx._source.event_count += params.new_event_count;
+                    ctx._source.duration_seconds = (double)(ctx._source.end_time - ctx._source.start_time) / 1000.0;
+                    ctx._source.last_updated = params.last_updated;
+                """,
                 "params": {
                     "modules": modules_list,
                     "paths": paths_list,
@@ -354,18 +343,11 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
             }
         }
 
-        # Add to bulk operations
-        lines.append(json.dumps({
-            "update": {
-                "_index": "session-summaries",
-                "_id": session_id
-            }
-        }, separators=(',', ':')))
+        lines.append(json.dumps({"update": {"_index": "session-summaries", "_id": session_id}}, separators=(',', ':')))
         lines.append(json.dumps(script, separators=(',', ':')))
 
     bulk_body = '\n'.join(lines) + '\n'
 
-    # Send to OpenSearch
     url = f'https://{endpoint}/_bulk'
     headers = {'Content-Type': 'application/x-ndjson'}
 
@@ -374,7 +356,6 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
         with urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode('utf-8'))
 
-        # LOG THE FULL RESPONSE
         print(f"Session update response: {json.dumps(result, indent=2)}")
 
         success_count = sum(
@@ -382,7 +363,6 @@ def update_session_summaries(documents: List[Dict], endpoint: str, region: str) 
             if (item.get('update') or {}).get('status') in (200, 201)
         )
 
-        # LOG FAILURES
         for item in result.get('items', []):
             update_result = item.get('update', {})
             if update_result.get('status') not in (200, 201):
