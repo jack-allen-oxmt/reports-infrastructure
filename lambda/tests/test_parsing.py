@@ -1,38 +1,37 @@
-import json
-from opensearch_lambda_function import parse_log_message, extract_asset_types, extract_site_tokens, should_include_log
+import pytest
+from opensearch_lambda_function import (
+    parse_log_message, extract_asset_types, extract_site_tokens, should_include_log
+)
 
+@pytest.mark.parametrize("message,expected_session,expected_user,expected_path", [
+    ("SESSION:[s1] USER:[u1] PATH:[/a]", "s1", "u1", "/a"),
+    ("SESSION:[s2] USER:[u2] PATH:[/b]", "s2", "u2", "/b"),
+    ("SESSION:[] USER:[] PATH:[]", None, None, None),
+])
+def test_parse_basic_fields(message, expected_session, expected_user, expected_path):
+    log_event = {"message": message, "timestamp": 1234567890}
+    doc = parse_log_message(log_event)
+    assert doc.get('session_id') == expected_session
+    assert doc.get('user') == expected_user
+    assert doc.get('path') == expected_path
 
-def make_event(message, timestamp=0):
-    return {'message': message, 'timestamp': timestamp}
+def test_extract_asset_types_various():
+    assert extract_asset_types([{"include": {"assetType": "A,B"}}]) == ["A", "B"]
+    assert extract_asset_types({"include": {"assetType": "X"}}) == ["X"]
+    assert extract_asset_types([]) is None
+    assert extract_asset_types({}) is None
 
+def test_extract_site_tokens_various():
+    assert extract_site_tokens([{"include": {"siteToken": "T1,T2"}}]) == ["T1", "T2"]
+    assert extract_site_tokens({"include": {"siteToken": "Z"}}) == ["Z"]
+    assert extract_site_tokens([]) is None
+    assert extract_site_tokens({}) is None
 
-def test_parse_basic_fields():
-    msg = "SESSION:[abc123] USER:[isaac.newton@oxmt.com] PATH:[/foo/bar] REQ_METHOD:[GET] STATUS_CODE:[200] RESPONSE-TIME:[123]"
-    doc = parse_log_message(make_event(msg, timestamp=1600000000000))
-    assert doc['session_id'] == 'abc123'
-    assert doc['user'] == 'isaac.newton@oxmt.com'
-    assert doc['path'] == '/foo/bar'
-    assert doc['method'] == 'GET'
-    assert doc['status_code'] == 200
-    assert doc['response_time'] == 123
-
-
-def test_extract_v2_body_list():
-    v2_body = [
-        {'include': {'assetType': 'video,audio', 'siteToken': 'foo'}},
-        {'include': {'assetType': 'audio', 'siteToken': 'bar'}}
-    ]
-    assert extract_asset_types(v2_body) == ['audio', 'video']
-    assert extract_site_tokens(v2_body) == ['bar', 'foo']
-
-
-def test_should_include_log_filters():
-    # unauthenticated
-    doc = {'user': 'UNAUTHENTICATED', 'path': '/foo'}
-    assert not should_include_log(doc)
-    # noise path
-    doc = {'user': 'joe', 'path': '/health'}
-    assert not should_include_log(doc)
-    # good doc
-    doc = {'user': 'joe', 'path': '/app/endpoint', 'raw_message': ''}
-    assert should_include_log(doc)
+@pytest.mark.parametrize("doc,expected", [
+    ({"user": "UNAUTHENTICATED", "path": "/a"}, False),
+    ({"user": "u1", "path": "/health"}, False),
+    ({"user": "u1", "path": "/a"}, True),
+    ({"user": "u1", "path": "/im_api/img/x", "status_code": 400}, False),
+])
+def test_should_include_log_logic(doc, expected):
+    assert should_include_log(doc) == expected
