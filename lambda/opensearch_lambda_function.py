@@ -13,6 +13,7 @@ from datetime import datetime
 
 NOISE_PATH_PREFIXES = ('/health', '/static/', '/public/', '/ui/v2/_nuxt/', '.locales/')
 PAGE_BEACON_PREFIX = '/im_ws/page-beacon'
+
 V2_BODY_REGEX = re.compile(r'V2_BODY:\s*\[(.*?)]\s*$', re.DOTALL)
 
 def _signed_request(method: str, url: str, body: Optional[bytes], headers: dict, region: str) -> Request:
@@ -20,7 +21,10 @@ def _signed_request(method: str, url: str, body: Optional[bytes], headers: dict,
     Build a SigV4-signed urllib Request for Amazon OpenSearch Service.
     """
     session = boto3.Session()
-    credentials = session.get_credentials().get_frozen_credentials()
+    creds = session.get_credentials()
+    if not creds:
+        raise RuntimeError('No AWS credentials available for SigV4 signing')
+    credentials = creds.get_frozen_credentials()
     aws_req = AWSRequest(method=method, url=url, data=body, headers=headers.copy())
     SigV4Auth(credentials, 'es', region).add_auth(aws_req)
     return Request(aws_req.url, data=aws_req.body, headers=dict(aws_req.headers), method=method)
@@ -52,7 +56,6 @@ def lambda_handler(event, context):
             documents.append(doc)
 
     # 3) Send individual events
-    events_sent = 0
     if documents:
         events_sent = send_events_to_opensearch(documents, endpoint, region)
         print(f"Successfully sent {events_sent}/{len(documents)} event documents to OpenSearch")
