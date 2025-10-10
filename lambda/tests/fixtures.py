@@ -1,7 +1,20 @@
-# fixtures.py
+"""
+Test fixtures for mocking urllib.request.urlopen calls to OpenSearch.
+
+IMPORTANT:
+- send_events_to_opensearch()  -> uses bulk "index" actions for events
+  -> bulk response items should be shaped like: {"items":[ {"index": {"status": 201, ...}}, ... ]}
+
+- update_session_summaries() -> uses bulk "update" actions with upsert
+  -> bulk response items should be shaped like: {"items":[ {"update": {"status": 200, "result":"updated"}}, ... ]}
+
+Use fake_urlopen('success') for an index-success (events).
+Use fake_urlopen('update') for an update-success (session upsert updated).
+Use fake_urlopen('created') to simulate update->created (upsert created a new doc, status 201).
+Use fake_urlopen('failure') to simulate failure (status 500, etc).
+"""
 import pytest
 import json
-from unittest.mock import MagicMock
 
 class DummyResponse:
     """Context manager that returns bytes from .read()"""
@@ -41,7 +54,6 @@ def fake_urlopen(monkeypatch):
         captured = {}
 
         def _urlopen(req, timeout=None):
-            # capture the Request (it may be a urllib.request.Request)
             captured['req'] = req
             return DummyResponse(body)
 
