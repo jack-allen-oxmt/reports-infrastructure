@@ -1,0 +1,66 @@
+GET session-summaries/_mapping
+GET session-summaries/_mapping
+
+
+PUT _index_template/session-summaries-template
+{
+  "index_patterns": ["session-summaries"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "session_id": {"type": "keyword"},
+        "user": {"type": "keyword"},
+        "modules": {"type": "keyword"},
+        "paths": {"type": "keyword"},
+        "assetTypes": {"type": "keyword"},
+        "siteTokens": {"type": "keyword"},
+        "start_time": {
+          "type": "date",
+          "format": "epoch_millis"
+        },
+        "end_time": {
+          "type": "date",
+          "format": "epoch_millis"
+        },
+        "last_updated": {
+          "type": "date",
+          "format": "epoch_millis"
+        },
+        "event_count": {"type": "integer"},
+        "duration_seconds": {"type": "float"}
+      }
+    }
+  },
+  "priority": 500
+}
+
+PUT _index_template/request-events-template
+{
+  "index_patterns": ["request-events-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "timestamp": {
+          "type": "date",
+          "format": "epoch_millis"
+        },
+        "session_id": {"type": "keyword"},
+        "user": {"type": "keyword"},
+        "path": {"type": "keyword"},
+        "method": {"type": "keyword"},
+        "module": {"type": "keyword"},
+        "status_code": {"type": "integer"},
+        "response_time": {"type": "integer"},
+        "assetTypes": {"type": "keyword"},
+        "siteTokens": {"type": "keyword"}
+      }
+    }
+  },
+  "priority": 500
+}
+
+DELETE session-summaries
+DELETE request-events-*
+
+GET _index_template/session-summaries-template
+GET _index_template/request-events-template
